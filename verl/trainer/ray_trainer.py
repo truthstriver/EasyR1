@@ -48,7 +48,59 @@ from .config import PPOConfig
 from .core_algos import AdvantageEstimator, FixedKLController, KLController, compute_kl, get_kl_controller
 from .metrics import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics, reduce_metrics
 
+def concat_data_protos(obj1: DataProto, obj2: DataProto) -> DataProto:
+    """
+    Concatenates two DataProto objects.
 
+    Args:
+        obj1: The first DataProto object.
+        obj2: The second DataProto object.
+
+    Returns:
+        A new DataProto object containing the combined data.
+    """
+    if not isinstance(obj1, DataProto) or not isinstance(obj2, DataProto):
+        raise TypeError("Both inputs must be DataProto objects.")
+
+    # 1. Concatenate the TensorDict `batch` using torch.cat
+    # This is the standard way to concatenate TensorDicts.
+    concatenated_batch = torch.cat([obj1.batch, obj2.batch], dim=0)
+
+    # 2. Concatenate the `non_tensor_batch` dictionary manually
+    new_non_tensor_batch = {}
+    
+    # Assume both dictionaries have the same keys
+    for key in obj1.non_tensor_batch:
+        val1 = obj1.non_tensor_batch[key]
+        val2 = obj2.non_tensor_batch[key]
+
+        if isinstance(val1, np.ndarray):
+            # For numpy arrays, use numpy's concatenate function
+            new_non_tensor_batch[key] = np.concatenate([val1, val2])
+        
+        elif isinstance(val1, dict) and key == 'meta_info':
+            # Special handling for the 'meta_info' dictionary
+            new_meta_info = {}
+            for meta_key in val1:
+                meta_val1 = val1[meta_key]
+                meta_val2 = val2[meta_key]
+                
+                if isinstance(meta_val1, list):
+                    # If the value is a list, concatenate the lists
+                    new_meta_info[meta_key] = meta_val1 + meta_val2
+                else:
+                    # Otherwise, assume the values are identical config values.
+                    # Assert they are the same and just take one.
+                    assert meta_val1 == meta_val2, f"Mismatch in meta_info for key '{meta_key}'"
+                    new_meta_info[meta_key] = meta_val1
+            new_non_tensor_batch[key] = new_meta_info
+            
+        else:
+            # Fallback for any other data types if needed
+            raise TypeError(f"Unhandled type for key '{key}': {type(val1)}")
+
+    # 3. Create and return the new, combined DataProto object
+    return DataProto(batch=concatenated_batch, non_tensor_batch=new_non_tensor_batch)
 class Role(IntEnum):
     """
     To create more roles dynamically, you can subclass Role and add new members
@@ -460,76 +512,111 @@ class RayPPOTrainer:
             new_batch: DataProto = DataProto.from_single_dict(batch_dict, meta_info=meta_info)
 
             # pop those keys for generation
-            gen_batch = new_batch.pop(
+            gen_batch_with_img = new_batch.pop(
                 batch_keys=["input_ids", "attention_mask", "position_ids"],
                 non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data"],
                 meta_info_keys=["min_pixels", "max_pixels"],
             )
+            gen_batch_without_img = deepcopy(gen_batch_with_img)  # avoid modifying the original batch
+            
+            n_with_img = int(self.config.worker.rollout.n * (1-self.config.worker.rollout.split_ratio))
+
+            gen_batch_with_img.meta_info["n"] = n_with_img
+            gen_batch_without_img.meta_info["n"] = self.config.worker.rollout.n - n_with_img
+
+
 
             # generate a batch
-            gen_batch_output = self.actor_rollout_ref_wg.generate_sequences(gen_batch)
+            gen_batch_output_with_img = self.actor_rollout_ref_wg.generate_sequences(gen_batch_with_img)
 
-            if self.config.algorithm.adv_estimator == "remax":
-                gen_baseline_batch = deepcopy(gen_batch)
-                gen_baseline_batch.meta_info["temperature"] = 0
-                gen_baseline_batch.meta_info["n"] = 1
-                gen_baseline_output = self.actor_rollout_ref_wg.generate_sequences(gen_baseline_batch)
+            gen_batch_output_without_img = self.actor_rollout_ref_wg.generate_sequences(gen_batch_without_img)
 
-                new_batch = new_batch.union(gen_baseline_output)
-                reward_baseline_tensor, _ = ray.get(self.reward_fn.compute_reward.remote(new_batch))
-                reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
+            # if self.config.algorithm.adv_estimator == "remax":
+            #     gen_baseline_batch = deepcopy(gen_batch)
+            #     gen_baseline_batch.meta_info["temperature"] = 0
+            #     gen_baseline_batch.meta_info["n"] = 1
+            #     gen_baseline_output = self.actor_rollout_ref_wg.generate_sequences(gen_baseline_batch)
 
-                new_batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
-                new_batch.batch["reward_baselines"] = reward_baseline_tensor
-                del gen_baseline_batch, gen_baseline_output
+            #     new_batch = new_batch.union(gen_baseline_output)
+            #     reward_baseline_tensor, _ = ray.get(self.reward_fn.compute_reward.remote(new_batch))
+            #     reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
-            new_batch.non_tensor_batch["uid"] = np.array(
-                [str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object
+            #     new_batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
+            #     new_batch.batch["reward_baselines"] = reward_baseline_tensor
+            #     del gen_baseline_batch, gen_baseline_output
+            
+            # new_batch.non_tensor_batch["uid"] = np.array(
+            #     [str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object
+            # )  # No more assign totally
+
+            # re assign the uid to the batch
+            new_batch_with_image = deepcopy(new_batch)
+            new_batch_without_image = deepcopy(new_batch)
+
+
+            new_batch_with_image.non_tensor_batch["uid"] = np.array(
+                [str(uuid.uuid4()) for _ in range(len(new_batch_with_image.batch))], dtype=object
             )
-            # repeat to align with repeated responses in rollout
-            new_batch = new_batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
-            new_batch = new_batch.union(gen_batch_output)
+            new_batch_without_image.non_tensor_batch["uid"] = np.array(
+                [str(uuid.uuid4()) for _ in range(len(new_batch_with_image.batch,len(new_batch_without_image.batch)))],
+                dtype=object,
+            )
 
-            # filter group
-            if self.config.algorithm.online_filtering:
-                reward_tensor, reward_metrics = ray.get(self.reward_fn.compute_reward.remote(new_batch))
-                new_batch.batch["token_level_scores"] = reward_tensor
-                for k, v in reward_metrics.items():
-                    all_metrics[k].extend(v)
+            new_batch_with_image.repeat(
+                repeat_times=n_with_img, interleave=True
+            )  # repeat to align with repeated responses in rollout
+            
+            new_batch_without_image.repeat(
+                repeat_times=self.config.worker.rollout.n - n_with_img, interleave=True
+            )  # repeat to align with repeated responses in rollout
+            
+            # new_batch = new_batch.union(gen_batch_output)
+            new_batch_with_image = new_batch_with_image.union(gen_batch_output_with_img)
+            new_batch_without_image = new_batch_without_image.union(gen_batch_output_without_img)
 
-                filter_scores = reward_metrics[self.config.algorithm.filter_key]
-                uids = new_batch.non_tensor_batch["uid"]
-                uid2scores = defaultdict(list)
-                for uid, score in zip(uids, filter_scores):
-                    uid2scores[uid].append(score)
+            # # filter group
+            # if self.config.algorithm.online_filtering:
+            #     reward_tensor, reward_metrics = ray.get(self.reward_fn.compute_reward.remote(new_batch))
+            #     new_batch.batch["token_level_scores"] = reward_tensor
+            #     for k, v in reward_metrics.items():
+            #         all_metrics[k].extend(v)
 
-                uid2mean = {uid: np.mean(scores) for uid, scores in uid2scores.items()}
-                kept_uids = [
-                    uid
-                    for uid, avg_score in uid2mean.items()
-                    if avg_score > self.config.algorithm.filter_low and avg_score < self.config.algorithm.filter_high
-                ]
-                kept_sample_idxs = [idx for idx, uid in enumerate(uids) if uid in kept_uids]
-                new_batch = new_batch[kept_sample_idxs]
+            #     filter_scores = reward_metrics[self.config.algorithm.filter_key]
+            #     uids = new_batch.non_tensor_batch["uid"]
+            #     uid2scores = defaultdict(list)
+            #     for uid, score in zip(uids, filter_scores):
+            #         uid2scores[uid].append(score)
 
-            batch = DataProto.concat([batch, new_batch]) if batch is not None else new_batch
-            current_batch_size = len(batch) // self.config.worker.rollout.n
-            rollout_batch_size = self.config.data.rollout_batch_size
-            if current_batch_size < rollout_batch_size:
-                print(f"{current_batch_size=} < {rollout_batch_size=}")
-                max_try_make_batch = self.config.trainer.max_try_make_batch
-                if max_try_make_batch <= 0 or num_try_make_batch < max_try_make_batch:
-                    print(f"{num_try_make_batch=}. Continue generating...")
-                else:
-                    raise ValueError(
-                        f"{num_try_make_batch=} >= {max_try_make_batch=}. Generated too many. Please check your data."
-                    )
-            else:
-                print(f"{current_batch_size=} >= {rollout_batch_size=}. Finish generating.")
-                if self.config.algorithm.online_filtering:
-                    metrics.update({f"reward/{k}": v for k, v in reduce_metrics(all_metrics).items()})
+            #     uid2mean = {uid: np.mean(scores) for uid, scores in uid2scores.items()}
+            #     kept_uids = [
+            #         uid
+            #         for uid, avg_score in uid2mean.items()
+            #         if avg_score > self.config.algorithm.filter_low and avg_score < self.config.algorithm.filter_high
+            #     ]
+            #     kept_sample_idxs = [idx for idx, uid in enumerate(uids) if uid in kept_uids]
+            #     new_batch = new_batch[kept_sample_idxs]
 
-                return batch[: self.config.data.rollout_batch_size * self.config.worker.rollout.n]
+            # batch = DataProto.concat([batch, new_batch]) if batch is not None else new_batch
+            # current_batch_size = len(batch) // self.config.worker.rollout.n
+            # rollout_batch_size = self.config.data.rollout_batch_size
+
+
+            # if current_batch_size < rollout_batch_size:
+            #     print(f"{current_batch_size=} < {rollout_batch_size=}")
+            #     max_try_make_batch = self.config.trainer.max_try_make_batch
+            #     if max_try_make_batch <= 0 or num_try_make_batch < max_try_make_batch:
+            #         print(f"{num_try_make_batch=}. Continue generating...")
+            #     else:
+            #         raise ValueError(
+            #             f"{num_try_make_batch=} >= {max_try_make_batch=}. Generated too many. Please check your data."
+            #         )
+            # else:
+            #     print(f"{current_batch_size=} >= {rollout_batch_size=}. Finish generating.")
+            #     if self.config.algorithm.online_filtering:
+            #         metrics.update({f"reward/{k}": v for k, v in reduce_metrics(all_metrics).items()})
+
+            #     return batch[: self.config.data.rollout_batch_size * self.config.worker.rollout.n]
+            return new_batch_with_image, new_batch_without_image
 
     def fit(self):
         """
@@ -563,38 +650,51 @@ class RayPPOTrainer:
                 # make a batch of data
                 with timer("gen", timing_raw):
                     self.actor_rollout_ref_wg.prepare_rollout_engine()
-                    batch = self._make_batch_data(metrics=metrics)
+                    batch_with_img, batch_without_img = self._make_batch_data(metrics=metrics)
                     self.actor_rollout_ref_wg.release_rollout_engine()
 
                 # balance the number of valid tokens on each dp rank.
                 # NOTE: this breaks the order of data inside the batch.
                 # Please take care when you implement group based adv computation such as GRPO and rloo
-                self._balance_batch(batch, metrics=metrics)
+                self._balance_batch(batch_with_img, metrics=metrics)
+                self._balance_batch(batch_without_img, metrics=metrics)
 
                 # compute global valid tokens
-                batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
-
-                # compute reward
-                if "token_level_scores" not in batch.batch:
-                    with timer("reward", timing_raw):
-                        reward_ref = self.reward_fn.compute_reward.remote(batch)
+                batch_with_img.meta_info["global_token_num"] = torch.sum(batch_with_img.batch["attention_mask"], dim=-1).tolist()
+                batch_without_img.meta_info["global_token_num"] = torch.sum(batch_without_img.batch["attention_mask"], dim=-1).tolist()
 
                 # recompute old_log_probs
                 with timer("old", timing_raw):
-                    old_log_probs = self.actor_rollout_ref_wg.compute_log_probs(batch)
-                    batch = batch.union(old_log_probs)
+                    old_log_probs_with_img = self.actor_rollout_ref_wg.compute_log_probs(batch_with_img)
+                    batch_with_img = batch_with_img.union(old_log_probs_with_img)
+                    
+                    old_log_probs_without_img = self.actor_rollout_ref_wg.compute_log_probs(batch_without_img)
+                    batch_without_img = batch_without_img.union(old_log_probs_without_img)
+
 
                 # compute ref_log_probs
                 if self.use_reference_policy:
                     with timer("ref", timing_raw):
-                        ref_log_probs = self.actor_rollout_ref_wg.compute_ref_log_probs(batch)
-                        batch = batch.union(ref_log_probs)
+                        ref_log_probs_with_img = self.actor_rollout_ref_wg.compute_ref_log_probs(batch_with_img)
+                        batch_with_img = batch_with_img.union(ref_log_probs_with_img)
 
-                # compute values
-                if self.use_critic:
-                    with timer("values", timing_raw):
-                        values = self.critic_wg.compute_values(batch)
-                        batch = batch.union(values)
+                        ref_log_probs_without_img = self.actor_rollout_ref_wg.compute_ref_log_probs(batch_without_img)
+                        batch_without_img = batch_without_img.union(ref_log_probs_without_img)
+
+
+                batch = concat_data_protos(
+                    batch_with_img, batch_without_img, merge_non_tensor_batch=True)
+
+                # compute reward
+                if "token_level_scores" not in batch.batch:
+                    with timer("reward", timing_raw):
+                        reward_ref = self.reward_fn.ciompote_reward.remote(batch)
+                        
+                # # compute values
+                # if self.use_critic:
+                #     with timer("values", timing_raw):
+                #         values = self.critic_wg.compute_values(batch)
+                #         batch = batch.union(values)
 
                 with timer("adv", timing_raw):
                     if "token_level_scores" not in batch.batch:

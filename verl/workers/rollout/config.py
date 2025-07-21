@@ -43,5 +43,9 @@ class RolloutConfig:
     response_length: int = field(default=-1, init=False)
     trust_remote_code: bool = field(default=False, init=False)
 
+    # below are Method related keys
+    split_ratio: float = 0.5
+    image_text_mixture: bool = False
+
     def to_dict(self):
         return asdict(self)
