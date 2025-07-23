@@ -1,9 +1,19 @@
 
 # 启动指令
+## 1、数据example记录
+修改examples/config.yaml中
+trainer:
+  ...
+  val_freq: 1  # -1 to disable （每个step都log）
+  ...
+  val_generations_to_log: 5 #（每一step log 5条）
+## 2、启动指令以及数据比例
 ```bash
 bash examples/XiaomiMiMO_VL_7B_geo3k_grpo.sh
 ```
+
 可以修改rollout_n以及rollout变化的比例SPLIT_RATIO。
+
 ```bash
 #!/bin/bash
 
