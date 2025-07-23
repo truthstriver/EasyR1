@@ -1,3 +1,9 @@
+
+# 启动指令
+```bash
+bash examples/XiaomiMiMO_VL_7B_geo3k_grpo.sh
+```
+
 # EasyR1: An Efficient, Scalable, Multi-Modality RL Training Framework
 
 [![GitHub Repo stars](https://img.shields.io/github/stars/hiyouga/EasyR1)](https://github.com/hiyouga/EasyR1/stargazers)
