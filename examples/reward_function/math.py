@@ -38,6 +38,11 @@ def compute_score(reward_inputs: List[Dict[str, Any]], format_weight: float = 0.
         response = re.sub(r"\s*(<|>|/)\s*", r"\1", reward_input["response"])  # handle qwen2.5vl-32b format
         format_score = format_reward(response)
         accuracy_score = accuracy_reward(response, reward_input["ground_truth"])
+
+        if rollout_type := reward_input.get("rollout_type"):
+            if rollout_type == "without_image":
+                accuracy_score = 0
+        
         scores.append(
             {
                 "overall": (1 - format_weight) * accuracy_score + format_weight * format_score,

@@ -18,6 +18,12 @@ mkdir -p "$HF_DATASETS_CACHE"
 # 如果可以正常联网，就不需要替换为本地地址，直接自动huggingface下载即可
 MODEL_PATH=XiaomiMiMo/MiMo-VL-7B-RL  # replace it with your local file path
 
+# 修改数据的比例
+SPLIT_RATIO=0.5
+
+# rollout的数量
+ROLLOUT_N=10
+
 python3 -m verl.trainer.main \
     config=examples/config.yaml \
     data.train_files=./geometry3k/data@train \
@@ -26,4 +32,7 @@ python3 -m verl.trainer.main \
     trainer.experiment_name=XiaomiMiMo_7B_RL_geo_grpo \
     trainer.logger=['console'] \
     trainer.n_gpus_per_node=8 \
+    worker.rollout.split_ratio=${SPLIT_RATIO} \
+    worker.rollout.n=${ROLLOUT_N} \
+    worker.rollout.image_text_mixture=False \
     worker.rollout.tensor_parallel_size=8

@@ -18,6 +18,12 @@ mkdir -p "$HF_DATASETS_CACHE"
 
 MODEL_PATH=/home/siqingyi/models/Qwen2.5-VL-3B-Instruct  # replace it with your local file path
 
+# 修改数据的比例
+SPLIT_RATIO=0.5
+
+# rollout的数量
+ROLLOUT_N=10
+
 python3 -m verl.trainer.main \
     config=examples/config.yaml \
     data.train_files=./geometry3k/data@train \
@@ -27,7 +33,8 @@ python3 -m verl.trainer.main \
     trainer.experiment_name=XiaomiMiMo_7B_RL_geo_grpo \
     worker.actor.fsdp.torch_dtype=bf16 \
     worker.actor.optim.strategy=adamw_bf16 \
-    worker.rollout.split_ratio=0.5 \
+    worker.rollout.split_ratio=${SPLIT_RATIO} \
+    worker.rollout.n=${ROLLOUT_N} \
     worker.rollout.image_text_mixture=False \
     trainer.logger=['console'] \
     trainer.n_gpus_per_node=2

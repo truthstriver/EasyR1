@@ -48,6 +48,74 @@ from .config import PPOConfig
 from .core_algos import AdvantageEstimator, FixedKLController, KLController, compute_kl, get_kl_controller
 from .metrics import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics, reduce_metrics
 
+
+import torch
+
+def modify_raw_prompt_ids(raw_prompt_ids, start_token=151652, end_token=151653, insert_token=151643, pad_token=0):
+    modified_sequences = []
+
+    for seq in raw_prompt_ids:
+        seq_list = list(seq)  # 确保是 Python list
+
+        # Step 1: 找到 start_token 和 end_token 的位置
+        try:
+            start_idx = seq_list.index(start_token)
+            end_idx = seq_list.index(end_token, start_idx)
+        except ValueError:
+            # 如果找不到 start_token 或 end_token，保留原序列
+            modified_sequences.append(seq_list)
+            continue
+
+        # Step 2: 删除 [start_token, end_token] 区间内的所有 token（包含两端）
+        deleted_tokens = seq_list[start_idx : end_idx + 1]
+        del seq_list[start_idx : end_idx + 1]
+        num_deleted = len(deleted_tokens)
+
+        # Step 3: 在开头插入相同数量的 insert_token
+        seq_list = [insert_token] * num_deleted + seq_list
+
+        # Step 4: 截断或填充以保持原始长度不变
+        original_length = len(seq)
+        if len(seq_list) > original_length:
+            seq_list = seq_list[:original_length]
+        elif len(seq_list) < original_length:
+            seq_list += [pad_token] * (original_length - len(seq_list))
+
+        modified_sequences.append(seq_list)
+
+    return np.array(modified_sequences, dtype=object)
+
+
+def modify_input_ids(input_ids, start_token=151652, end_token=151653, insert_token=151643):
+    modified_input_ids = []
+    for seq in input_ids:
+        seq_list = seq.tolist()  # 转换为 Python list 方便处理
+        
+        # 1. 找到 start_token 和 end_token 的位置
+        try:
+            start_idx = seq_list.index(start_token)
+            end_idx = seq_list.index(end_token, start_idx)
+        except ValueError:  # 如果没有找到 start_token 或 end_token，则跳过
+            modified_input_ids.append(seq)
+            continue
+        
+        # 2. 删除 start_token 到 end_token（含）之间的所有 token
+        del seq_list[start_idx : end_idx + 1]
+        num_deleted = end_idx - start_idx + 1
+        
+        # 3. 在开头插入相同数量的 insert_token
+        seq_list = [insert_token] * num_deleted + seq_list
+        
+        # 4. 保持长度不变（可能需要截断或填充）
+        if len(seq_list) > len(seq):  # 如果太长，截断
+            seq_list = seq_list[:len(seq)]
+        elif len(seq_list) < len(seq):  # 如果太短，用 pad_token 填充（假设 pad_token=0）
+            seq_list += [0] * (len(seq) - len(seq_list))
+        
+        modified_input_ids.append(torch.tensor(seq_list, dtype=seq.dtype, device=seq.device))
+    
+    return torch.stack(modified_input_ids)
+
 def concat_data_protos(obj1: DataProto, obj2: DataProto) -> DataProto:
     """
     Concatenates two DataProto objects.
@@ -63,44 +131,59 @@ def concat_data_protos(obj1: DataProto, obj2: DataProto) -> DataProto:
         raise TypeError("Both inputs must be DataProto objects.")
 
     # 1. Concatenate the TensorDict `batch` using torch.cat
-    # This is the standard way to concatenate TensorDicts.
     concatenated_batch = torch.cat([obj1.batch, obj2.batch], dim=0)
 
     # 2. Concatenate the `non_tensor_batch` dictionary manually
     new_non_tensor_batch = {}
-    
-    # Assume both dictionaries have the same keys
     for key in obj1.non_tensor_batch:
         val1 = obj1.non_tensor_batch[key]
-        val2 = obj2.non_tensor_batch[key]
-
-        if isinstance(val1, np.ndarray):
-            # For numpy arrays, use numpy's concatenate function
-            new_non_tensor_batch[key] = np.concatenate([val1, val2])
-        
-        elif isinstance(val1, dict) and key == 'meta_info':
-            # Special handling for the 'meta_info' dictionary
-            new_meta_info = {}
-            for meta_key in val1:
-                meta_val1 = val1[meta_key]
-                meta_val2 = val2[meta_key]
-                
-                if isinstance(meta_val1, list):
-                    # If the value is a list, concatenate the lists
-                    new_meta_info[meta_key] = meta_val1 + meta_val2
-                else:
-                    # Otherwise, assume the values are identical config values.
-                    # Assert they are the same and just take one.
-                    assert meta_val1 == meta_val2, f"Mismatch in meta_info for key '{meta_key}'"
-                    new_meta_info[meta_key] = meta_val1
-            new_non_tensor_batch[key] = new_meta_info
-            
+        if key=="multi_modal_data":
+            val2 = np.array([{"images":[]}] * len(obj2.batch))
         else:
-            # Fallback for any other data types if needed
+            val2 = obj2.non_tensor_batch[key]
+        
+        if isinstance(val1, np.ndarray):
+            new_non_tensor_batch[key] = np.concatenate([val1, val2])
+        else:
             raise TypeError(f"Unhandled type for key '{key}': {type(val1)}")
 
-    # 3. Create and return the new, combined DataProto object
-    return DataProto(batch=concatenated_batch, non_tensor_batch=new_non_tensor_batch)
+    # 3. Handle meta_info concatenation
+    new_meta_info = {}
+    for key in obj1.meta_info:
+        val1 = obj1.meta_info[key]
+        val2 = obj2.meta_info[key]
+        
+        if key == 'global_token_num':
+            # Special handling for token_num: concatenate the lists
+            new_meta_info[key] = val1 + val2
+        elif isinstance(val1, list):
+            # For regular lists, concatenate them
+            new_meta_info[key] = val1 + val2
+        elif isinstance(val1, (int, float, str)):
+            # For scalar values, verify they're identical and keep one
+            if val1 != val2:
+                raise ValueError(f"meta_info values for key '{key}' differ between objects")
+            new_meta_info[key] = val1
+        elif isinstance(val1, dict):
+            # For dictionaries, recursively merge them
+            if val1.keys() != val2.keys():
+                raise ValueError(f"Dictionary keys in meta_info '{key}' differ between objects")
+            merged_dict = {}
+            for sub_key in val1:
+                if val1[sub_key] != val2[sub_key]:
+                    raise ValueError(f"Dictionary values in meta_info '{key}.{sub_key}' differ between objects")
+                merged_dict[sub_key] = val1[sub_key]
+            new_meta_info[key] = merged_dict
+        else:
+            raise TypeError(f"Unhandled type in meta_info for key '{key}': {type(val1)}")
+
+    # Create and return the new, combined DataProto object
+    return DataProto(
+        batch=concatenated_batch,
+        non_tensor_batch=new_non_tensor_batch,
+        meta_info=new_meta_info
+    )
+
 class Role(IntEnum):
     """
     To create more roles dynamically, you can subclass Role and add new members
@@ -518,7 +601,13 @@ class RayPPOTrainer:
                 meta_info_keys=["min_pixels", "max_pixels"],
             )
             gen_batch_without_img = deepcopy(gen_batch_with_img)  # avoid modifying the original batch
+            _ = gen_batch_without_img.pop(batch_keys=[],non_tensor_batch_keys=["multi_modal_data"],meta_info_keys=[])
+            # 应用修改
+            gen_batch_without_img.batch["input_ids"] = modify_input_ids(gen_batch_without_img.batch["input_ids"])
+            gen_batch_without_img.non_tensor_batch["raw_prompt_ids"] = modify_raw_prompt_ids(
+                gen_batch_without_img.non_tensor_batch["raw_prompt_ids"])
             
+
             n_with_img = int(self.config.worker.rollout.n * (1-self.config.worker.rollout.split_ratio))
 
             gen_batch_with_img.meta_info["n"] = n_with_img
@@ -558,15 +647,15 @@ class RayPPOTrainer:
                 [str(uuid.uuid4()) for _ in range(len(new_batch_with_image.batch))], dtype=object
             )
             new_batch_without_image.non_tensor_batch["uid"] = np.array(
-                [str(uuid.uuid4()) for _ in range(len(new_batch_with_image.batch,len(new_batch_without_image.batch)))],
+                [str(uuid.uuid4()) for _ in range(len(new_batch_with_image.batch),len(new_batch_with_image.batch) + len(new_batch_without_image.batch))],
                 dtype=object,
             )
 
-            new_batch_with_image.repeat(
+            new_batch_with_image = new_batch_with_image.repeat(
                 repeat_times=n_with_img, interleave=True
             )  # repeat to align with repeated responses in rollout
             
-            new_batch_without_image.repeat(
+            new_batch_without_image = new_batch_without_image.repeat(
                 repeat_times=self.config.worker.rollout.n - n_with_img, interleave=True
             )  # repeat to align with repeated responses in rollout
             
@@ -652,7 +741,8 @@ class RayPPOTrainer:
                     self.actor_rollout_ref_wg.prepare_rollout_engine()
                     batch_with_img, batch_without_img = self._make_batch_data(metrics=metrics)
                     self.actor_rollout_ref_wg.release_rollout_engine()
-
+                    
+                    
                 # balance the number of valid tokens on each dp rank.
                 # NOTE: this breaks the order of data inside the batch.
                 # Please take care when you implement group based adv computation such as GRPO and rloo
@@ -682,13 +772,14 @@ class RayPPOTrainer:
                         batch_without_img = batch_without_img.union(ref_log_probs_without_img)
 
 
-                batch = concat_data_protos(
-                    batch_with_img, batch_without_img, merge_non_tensor_batch=True)
+                batch = concat_data_protos(batch_with_img, batch_without_img)
+                batch.meta_info["rollout_type"] = ["with_image"] * len(batch_with_img) + ["without_image"] * len(batch_without_img)
 
+                
                 # compute reward
                 if "token_level_scores" not in batch.batch:
                     with timer("reward", timing_raw):
-                        reward_ref = self.reward_fn.ciompote_reward.remote(batch)
+                        reward_ref = self.reward_fn.compute_reward.remote(batch)
                         
                 # # compute values
                 # if self.use_critic:

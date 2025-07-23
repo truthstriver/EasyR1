@@ -446,9 +446,13 @@ class FSDPWorker(Worker):
     def _process_multi_modal_inputs(self, data: DataProto):
         if "multi_modal_data" not in data.non_tensor_batch:
             return
+        
 
-        if "uid" in self._cache and not np.all(data.non_tensor_batch["uid"] == self._cache["uid"]):
-            self._cache.clear()
+        if "uid" in self._cache:
+            if len(data.non_tensor_batch['uid'])!=len( self._cache["uid"]):
+                self._cache.clear()
+            elif not np.all(data.non_tensor_batch["uid"] == self._cache["uid"]):
+                self._cache.clear()
 
         if "multi_modal_inputs" not in self._cache:
             min_pixels = data.meta_info["min_pixels"]
