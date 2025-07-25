@@ -30,6 +30,8 @@ python3 -m verl.trainer.main \
     data.val_files=./geometry3k/data@test \
     worker.actor.model.model_path=${MODEL_PATH} \
     trainer.experiment_name=XiaomiMiMo_7B_RL_geo_grpo \
+    worker.actor.fsdp.torch_dtype=bf16 \
+    worker.actor.optim.strategy=adamw_bf16 \
     trainer.logger=['console'] \
     trainer.n_gpus_per_node=8 \
     worker.rollout.split_ratio=${SPLIT_RATIO} \
