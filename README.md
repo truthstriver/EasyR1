@@ -1,5 +1,10 @@
+# 下载数据
+```bash
+pip install modelscope
+modelscope download --dataset zebro1/MMMathDatasets --local-_dir ./data
+```
 
-# 启动指令
+# 训练GRPO
 ## 1、数据example记录
 修改examples/config.yaml中
 ```yaml
@@ -55,6 +60,34 @@ python3 -m verl.trainer.main \
     worker.rollout.n=${ROLLOUT_N} \
     worker.rollout.image_text_mixture=False \
     worker.rollout.tensor_parallel_size=8
+```
+## 模型合并
+这一个指令会在原始位置生成一个huggingface目录，就是chkpt。
+```bash
+python3 scripts/model_merger.py --local_dir checkpoints/easy_r1/exp_name/global_step_1/actor(最好的step chkpt)
+```
+## 模型评测
+首先根据上述合并得到的chkpt启动vllm后端。
+
+```bash
+export CUDA_VISIBLE_DEVICES=6,7
+vllm serve  /home/siqingyi/Easy-R1_checkpoints/plain_grpo/global_step_50/actor/huggingface/(最好step chkpt合并后的目录）  \
+  --host 0.0.0.0 \
+  --port 8006 \
+  --dtype auto \
+  --tensor-parallel-size 2 \
+  --gpu-memory-utilization 0.95 \
+  --served-model-name Qwen2-VL-7B-Instruct \
+  --limit-mm-per-prompt image=1 \
+  --max-model-len 16384 \
+```
+
+然后启动模型评测。
+
+```bash
+python scripts/test_mimo_mathvista.py
+python scripts/test_mimo_mathvision.py
+python scripts/test_mimo_mathverse.py
 ```
 
 # EasyR1: An Efficient, Scalable, Multi-Modality RL Training Framework
