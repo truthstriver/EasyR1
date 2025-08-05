@@ -84,7 +84,7 @@ test_data = processed_test_data  # replace with processed format
 # Prepare output directory and file
 output_dir = "results"
 os.makedirs(output_dir, exist_ok=True)
-output_file = os.path.join(output_dir, "MathViVerse_results_xiaomimimo_vl_mathruler_grading_6-23_ORIGIN.json")
+output_file = os.path.join(output_dir, "MathVision_results_xiaomimimo_vl_mathruler_grading_6-23_ORIGIN.json")
 
 # Batch evaluation
 concurrent_requests_batch_size = 20
